@@ -16,10 +16,10 @@ const TOKEN_TTL = "7d";
 // إعداد الكوكيز المناسب للبيئة المحلية والإنتاجية
 const cookieOptions = {
   httpOnly: true,
-  sameSite: process.env.NODE_ENV === "production" ? "strict" : "lax",
-  secure: process.env.NODE_ENV === "production",
+  sameSite: "none", // يسمح عبر الدومين
+  secure: true,     // ضروري يكون الموقع https
   path: "/",
-  maxAge: 7 * 24 * 60 * 60 * 1000, // أسبوع
+  maxAge: 7 * 24 * 60 * 60 * 1000,
 };
 
 // نموذج المستخدم
