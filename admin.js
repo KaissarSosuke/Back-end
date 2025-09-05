@@ -7,8 +7,7 @@ const router = express.Router();
 // ============ إعدادات الأدمن ============
 const ADMINS = [
   "kaissbrika@gmail.com",
-  "ar.brika@gmail.com",
-"rikadarweesh7@gmail.com"
+  "ar.brika@gmail.com"
 ];
 
 // Middleware: يسمح فقط للأدمن بالدخول
