@@ -7,7 +7,8 @@ const router = express.Router();
 // ============ إعدادات الأدمن ============
 const ADMINS = [
   "kaissbrika@gmail.com",
-  "ar.brika@gmail.com" // غيّرها لإيميل الأدمن الحقيقي
+  "ar.brika@gmail.com",
+"rikadarweesh7@gmail.com"
 ];
 
 // Middleware: يسمح فقط للأدمن بالدخول
