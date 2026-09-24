@@ -1,65 +1,30 @@
 const express = require("express");
+const Product = require("./models/Product");
+const { pageParams, setPageHeaders, escapeRegex } = require("./lib/security");
 const router = express.Router();
-const mongoose = require("mongoose");
-
-// نموذج المنتج
-const productSchema = new mongoose.Schema({
-  id: { type: Number, required: true, unique: true },
-  name: { type: String, required: true },
-  desc: { type: String, required: true },
-  price: { type: Number, required: true },
-  images: [String],
-  tags: [String],
-  category: { type: String, required: true },
-  sold: { type: Number, default: 0 },
-  stock: { type: Number, required: true },
-  added: { type: Number, required: true },
-  rating: { type: Number, default: 0 },
-  reviews: { type: Number, default: 0 }
-}, { collection: 'products' });
-
-const Product = mongoose.model("Product", productSchema);
-
-// جلب جميع المنتجات
+const cache = new Map();
+const TTL = 30 * 1000;
+function clearCache() { cache.clear(); }
 router.get("/", async (req, res) => {
   try {
-    // ترتيب ودعم الفلترة حسب طلب الفرونت
-    let { category, search, sort } = req.query;
-    let filter = {};
-    if (category && category !== "الكل") {
-      filter.category = category;
+    const { category, search, sort } = req.query;
+    if ((category !== undefined && typeof category !== "string") || (search !== undefined && typeof search !== "string") || (sort !== undefined && typeof sort !== "string")) return res.status(400).json({ message: "معاملات البحث غير صحيحة" });
+    const { limit, page, skip } = pageParams(req.query);
+    const key = JSON.stringify({ category, search, sort, limit, page });
+    const cached = cache.get(key);
+    if (cached && cached.expires > Date.now()) { cached.headers.forEach(([k, v]) => res.set(k, v)); return res.json(cached.data); }
+    const filter = {};
+    if (category && category !== "الكل") filter.category = category;
+    if (search?.trim()) {
+      const safe = escapeRegex(search.trim().slice(0, 100));
+      filter.$or = [{ name: new RegExp(safe, "i") }, { tags: { $elemMatch: { $regex: new RegExp(safe, "i") } } }];
     }
-    if (search && search.trim().length) {
-      const searchRegex = new RegExp(search.trim(), "i");
-      filter.$or = [
-        { name: searchRegex },
-        { tags: { $elemMatch: { $regex: searchRegex } } }
-      ];
-    }
-
-    let sortObj = {};
-    switch (sort) {
-      case "newest":
-        sortObj.added = -1;
-        break;
-      case "lowest":
-        sortObj.price = 1;
-        break;
-      case "highest":
-        sortObj.price = -1;
-        break;
-      case "mostsold":
-        sortObj.sold = -1;
-        break;
-      default:
-        sortObj.id = 1;
-    }
-
-    const products = await Product.find(filter).sort(sortObj).lean();
-    res.json(products);
-  } catch (err) {
-    res.status(500).json({ error: "خطأ في جلب المنتجات" });
-  }
+    const sortObj = { newest: { added: -1 }, lowest: { price: 1 }, highest: { price: -1 }, mostsold: { sold: -1 } }[sort] || { id: 1 };
+    const [data, total] = await Promise.all([Product.find(filter).sort(sortObj).skip(skip).limit(limit).lean(), Product.countDocuments(filter)]);
+    setPageHeaders(res, total, page, limit);
+    cache.set(key, { data, expires: Date.now() + TTL, headers: [["X-Total-Count", String(total)], ["X-Page", String(page)], ["X-Limit", String(limit)], ["X-Has-More", String(page * limit < total)]] });
+    res.json(data);
+  } catch (_) { res.status(500).json({ message: "خطأ في جلب المنتجات" }); }
 });
-
+router.clearCache = clearCache;
 module.exports = router;

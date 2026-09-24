@@ -1,78 +1,57 @@
+require("dotenv").config();
+const required = ["MONGODB_URI", "JWT_SECRET", "SMTP_USER", "SMTP_PASS"];
+const missing = required.filter((key) => !process.env[key]);
+if (missing.length) throw new Error(`Missing required environment variables: ${missing.join(", ")}`);
+
 const express = require("express");
 const mongoose = require("mongoose");
-const bcrypt = require("bcryptjs");
 const cors = require("cors");
 const cookieParser = require("cookie-parser");
-const jwt = require("jsonwebtoken");
 const helmet = require("helmet");
-require("dotenv").config();
-
+const { csrfToken, csrfProtection, stateLimiter } = require("./lib/security");
+const User = require("./models/User");
 const app = express();
 app.set("trust proxy", 1);
 
-app.use(
-  cors({
-    origin: [
-
-      "https://kaissarsosuke.github.io"
-      
-            ], // يدعم الاثنين
-    credentials: true,
-  })
-);
-
+app.use(cors({ origin: ["https://kaissarsosuke.github.io"], credentials: true }));
 app.use(helmet());
-app.use(express.json());
+app.use(express.json({ limit: "100kb" }));
 app.use(cookieParser());
+app.get("/api/csrf-token", csrfToken);
+app.use(csrfProtection);
+app.use((req, res, next) => (["POST", "PUT", "PATCH", "DELETE"].includes(req.method) ? stateLimiter(req, res, next) : next()));
 
-mongoose.connect(
-  "mongodb+srv://kaiss:Nigga542007@cluster0.hrv2uow.mongodb.net/?retryWrites=true&w=majority&appName=Cluster0"
-)
-.then(() => {
-  console.log("Connected to MongoDB");
-})
-.catch((err) => {
-  console.error("error with connection to MongoDB", err);
-});
-
-// استيراد راوت التسجيل
-const signUpRoutes = require("./signup.js");
+const signUpRoutes = require("./signup");
+const { router: authRoutes } = require("./signin");
+const productsRoutes = require("./products");
+const userCartRoutes = require("./user-cart");
+const paymentRoutes = require("./payment");
+const settingRoutes = require("./settings");
+const adminRoutes = require("./admin");
+const contactRoutes = require("./contact");
+const rateRoutes = require("./rate");
 app.use("/api", signUpRoutes);
-
-// استيراد راوت تسجيل الدخول
-const { router: authRoutes } = require("./signin.js");
 app.use("/api", authRoutes);
-
-// استيراد واستعمال راوت المنتجات
-const productsRoutes = require("./products.js");
 app.use("/api/products", productsRoutes);
-
-// استيراد واستعمال راوت السلة
-const userCartRoutes = require("./user-cart.js");
 app.use("/api/user-cart", userCartRoutes);
-
-// استيراد واستعمال راوت الدفع والطلبات
-const paymentRoutes = require("./payment.js");
 app.use("/api", paymentRoutes);
-
-// استيراد واستعمال راوت الإعدادات
-// في server.js (بعد تسجيل الدخول والتسجيل)
-const settingRoutes = require("./settings.js");
 app.use("/api/settings", settingRoutes);
-
-
-// استيراد واستعمال راوت الأدمن
-const adminRoutes = require("./admin.js");
 app.use("/api", adminRoutes);
-
-// استيراد واستعمال راوت تقييم المنتجات + الرسائل
-const contactRoutes = require("./contact.js");
 app.use("/api", contactRoutes);
-
-// استيراد واستعمال راوت تقييم المنتجات
-const rateRoutes = require("./rate.js");
 app.use("/api", rateRoutes);
-
-app.listen(2007, () => {
-  console.log("Server is running on port 2007");
+app.use((req, res) => res.status(404).json({ message: "المسار غير موجود" }));
+app.use((err, req, res, next) => {
+  if (res.headersSent) return next(err);
+  console.error("REQUEST_ERROR:", err.message);
+  res.status(err.statusCode || 500).json({ message: "حدث خطأ غير متوقع" });
 });
+
+async function start() {
+  await mongoose.connect(process.env.MONGODB_URI);
+  const configuredAdmins = (process.env.ADMIN_EMAILS || "").split(",").map((e) => e.trim().toLowerCase()).filter(Boolean);
+  if (configuredAdmins.length) await User.updateMany({ email: { $in: configuredAdmins } }, { $set: { role: "admin" } });
+  const port = Number(process.env.PORT) || 2007;
+  app.listen(port, () => console.log(`Server is running on port ${port}`));
+}
+if (require.main === module) start().catch((err) => { console.error("Startup failed:", err.message); process.exit(1); });
+module.exports = app;

@@ -1,15 +1,15 @@
 const express = require("express");
 const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
-const mongoose = require("mongoose");
 const rateLimit = require("express-rate-limit");
 const { ipKeyGenerator } = require("express-rate-limit");
-const cookieParser = require("cookie-parser");
+const User = require("./models/User");
 
 const router = express.Router();
 
 // إعدادات التوكن والكوكيز
-const JWT_SECRET = process.env.JWT_SECRET || "CHANGE_ME_IN_ENV_FILE";
+const JWT_SECRET = process.env.JWT_SECRET;
+if (!JWT_SECRET) throw new Error("Missing required environment variable: JWT_SECRET");
 const TOKEN_COOKIE_NAME = "token";
 const TOKEN_TTL = "7d";
 
@@ -23,25 +23,9 @@ const cookieOptions = {
 };
 
 // نموذج المستخدم
-let User;
-try {
-  User = require("./models/User");
-} catch (_) {
-  const userSchema = new mongoose.Schema(
-    {
-      fullName: { type: String, required: true, trim: true, minlength: 2, maxlength: 80 },
-      email:    { type: String, required: true, unique: true, lowercase: true, trim: true },
-      password:     { type: String, required: false, select: false },
-      passwordHash: { type: String, required: false, select: false },
-    },
-    { timestamps: true }
-  );
-  User = mongoose.models.User || mongoose.model("User", userSchema);
-}
-
 // إرجاع بيانات المستخدم الآمنة فقط
 function toSafeUser(u) {
-  return { id: String(u._id), fullName: u.fullName, email: u.email };
+  return { id: String(u._id), fullName: u.fullName, email: u.email, role: u.role };
 }
 
 // ميدلوير التحقق من التوكن في الكوكيز وجعله أكثر قوة
@@ -56,6 +40,7 @@ function auth(req, res, next) {
   if (!token) return res.status(401).json({ message: "غير مصرح" });
   try {
     const payload = jwt.verify(token, JWT_SECRET);
+    if (typeof payload.sub !== "string") return res.status(401).json({ message: "جلسة غير صالحة" });
     req.userId = payload.sub;
     req.userEmail = payload.email;
     next();
@@ -155,8 +140,17 @@ router.get("/check-auth", auth, (req, res) => {
   return res.status(200).json({ message: "مصرح", userId: req.userId, email: req.userEmail });
 });
 
+async function adminOnly(req, res, next) {
+  try {
+    const user = await User.findById(req.userId).select("role").lean();
+    if (!user || user.role !== "admin") return res.status(403).json({ message: "غير مصرح: هذه الصفحة للأدمن فقط" });
+    next();
+  } catch (_) { res.status(403).json({ message: "غير مصرح" }); }
+}
+
 // تصدير الميدلوير والراوتر معاً
 module.exports = {
   router,
   auth
+  ,adminOnly
 };
