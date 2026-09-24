@@ -5,10 +5,21 @@ const { auth } = require("./signin.js");
 const router = express.Router();
 
 // ============ إعدادات الأدمن ============
-const ADMINS = [
-  "kaissbrika@gmail.com",
-  "ar.brika@gmail.com"
-];
+// Admin check via role field (replaces hardcoded email list)
+const ADMIN_ROLE = "admin";
+
+// Middleware: allows only admins (by role field)
+function adminOnly(req, res, next) {
+  try {
+    const user = await User.findById(req.userId).select("role").lean();
+    if (!user || user.role !== ADMIN_ROLE) {
+      return res.status(403).json({ message: "غير مصرح: هذه الصفحة للأدمن فقط" });
+    }
+    next;
+  } catch (err) {
+    res.status(403).json({ message: "غير مصرح: لا يمكن التحقق من الصلاحيات" });
+  }
+}
 
 // Middleware: يسمح فقط للأدمن بالدخول
 function adminOnly(req, res, next) {
