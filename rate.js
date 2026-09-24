@@ -1,7 +1,10 @@
 const express = require("express");
 const mongoose = require("mongoose");
+const rateLimit = require("express-rate-limit");
 const { auth } = require("./signin.js");
+const { sanitizeObjectStrings, sanitizeString } = require("./lib/security");
 const router = express.Router();
+const rateLimiter = rateLimit({ windowMs: 15 * 60 * 1000, max: 30, standardHeaders: true, legacyHeaders: false, message: { message: "محاولات كثيرة جداً، حاول لاحقاً." } });
 
 // سكيمات
 const ratingSchema = new mongoose.Schema({
@@ -16,10 +19,14 @@ const ratingSchema = new mongoose.Schema({
 const Rating = mongoose.models.Rating || mongoose.model("Rating", ratingSchema);
 
 // تقييم منتج
-router.post("/rate", auth, async (req, res) => {
+router.post("/rate", rateLimiter, auth, async (req, res) => {
   try {
-    const { orderId, productId, rating, note } = req.body;
-    if (!orderId || !productId || !rating) {
+    const payload = sanitizeObjectStrings(req.body || {});
+    const orderId = sanitizeString(payload.orderId, 50);
+    const productId = sanitizeString(payload.productId, 50);
+    const rating = Number(payload.rating);
+    const note = sanitizeString(payload.note || "", 2000);
+    if (!orderId || !productId || !Number.isFinite(rating)) {
       return res.status(400).json({ message: "كل الحقول مطلوبة." });
     }
     if (rating < 1 || rating > 5) {

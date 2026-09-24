@@ -1,7 +1,11 @@
 const express = require("express");
 const mongoose = require("mongoose");
+const rateLimit = require("express-rate-limit");
+const { auth, adminOnly } = require("./signin.js");
+const { pageParams, sanitizeString, sanitizeObjectStrings } = require("./lib/security");
 
 const router = express.Router();
+const contactLimiter = rateLimit({ windowMs: 15 * 60 * 1000, max: 10, standardHeaders: true, legacyHeaders: false, message: { message: "محاولات كثيرة جداً، حاول لاحقاً." } });
 
 // نموذج الرسالة
 const contactSchema = new mongoose.Schema(
@@ -17,25 +21,20 @@ const contactSchema = new mongoose.Schema(
 const Contact = mongoose.models.Contact || mongoose.model("Contact", contactSchema);
 
 // إرسال رسالة تواصل
-router.post("/contact", async (req, res) => {
+router.post("/contact", contactLimiter, async (req, res) => {
   try {
-    const { name, email, message } = req.body || {};
-    if (
-      typeof name !== "string" ||
-      typeof email !== "string" ||
-      typeof message !== "string" ||
-      !name.trim() ||
-      !email.trim() ||
-      !message.trim()
-    ) {
+    const payload = sanitizeObjectStrings(req.body || {});
+    const name = sanitizeString(payload.name, 80);
+    const email = sanitizeString(payload.email, 200).toLowerCase();
+    const message = sanitizeString(payload.message, 2000);
+    if (!name || !email || !message || !/.+@.+\..+/.test(email)) {
       return res.status(400).json({ message: "يرجى تعبئة جميع الحقول بشكل صحيح" });
     }
 
-    // حفظ الرسالة في قاعدة البيانات
-    const newMsg = await Contact.create({
-      name: name.trim(),
-      email: email.trim().toLowerCase(),
-      message: message.trim(),
+    await Contact.create({
+      name,
+      email,
+      message,
       ip: req.headers["x-forwarded-for"] || req.connection.remoteAddress,
     });
 
@@ -46,11 +45,14 @@ router.post("/contact", async (req, res) => {
   }
 });
 
-// إظهار جميع الرسائل (للمشاهدة فقط في الباك اند)
-router.get("/contact/messages", async (req, res) => {
+router.get("/contact/messages", auth, adminOnly, async (req, res) => {
   try {
-    // يمكنك إضافة تحقق أدمن هنا لاحقاً
-    const msgs = await Contact.find().sort({ createdAt: -1 });
+    const { limit, page, skip } = pageParams(req.query);
+    const [msgs, total] = await Promise.all([
+      Contact.find({}).sort({ createdAt: -1 }).skip(skip).limit(limit).lean(),
+      Contact.countDocuments({})
+    ]);
+    res.set({ "X-Total-Count": String(total), "X-Page": String(page), "X-Limit": String(limit) });
     return res.status(200).json(msgs);
   } catch (err) {
     return res.status(500).json({ message: "حدث خطأ بجلب الرسائل" });

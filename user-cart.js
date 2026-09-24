@@ -1,8 +1,11 @@
 const express = require("express");
 const mongoose = require("mongoose");
-const { auth } = require("./signin.js");
+const rateLimit = require("express-rate-limit");
+const { auth, adminOnly } = require("./signin.js");
+const { sanitizeObjectStrings, sanitizeString } = require("./lib/security");
 
 const router = express.Router();
+const cartLimiter = rateLimit({ windowMs: 15 * 60 * 1000, max: 60, standardHeaders: true, legacyHeaders: false, message: { message: "محاولات كثيرة جداً، حاول لاحقاً." } });
 
 // ====== تعريف مخطط السلة ======
 const userCartSchema = new mongoose.Schema({
@@ -27,25 +30,24 @@ const UserCart = mongoose.model("UserCart", userCartSchema);
 const Product = mongoose.model("Product");
 
 // =========== دالة إضافة منتج إلى السلة ===========
-router.post("/add", auth, async (req, res) => {
+router.post("/add", cartLimiter, auth, async (req, res) => {
   try {
-    const { productId, qty } = req.body;
-    if (!productId || !qty || qty < 1) {
+    const payload = sanitizeObjectStrings(req.body || {});
+    const productId = sanitizeString(payload.productId, 50);
+    const qty = Number(payload.qty);
+    if (!productId || !Number.isFinite(qty) || qty < 1) {
       return res.status(400).json({ message: "بيانات المنتج أو الكمية غير صحيحة." });
     }
 
-    // جلب بيانات المستخدم من قاعدة البيانات
     const user = await mongoose.model("User").findById(req.userId).select("fullName email").exec();
     if (!user) return res.status(401).json({ message: "المستخدم غير موجود." });
 
-    // جلب بيانات المنتج
     const product = await Product.findById(productId).lean();
     if (!product) return res.status(404).json({ message: "المنتج غير موجود." });
+    if (qty > Number(product.stock || 0)) return res.status(400).json({ message: `لا يوجد مخزون كافٍ للمنتج ${product.name}.` });
 
     let cart = await UserCart.findOne({ userId: user._id });
-
     if (!cart) {
-      // إذا لا يوجد سلة أنشئ واحدة جديدة
       cart = new UserCart({
         userId: user._id,
         fullName: user.fullName,
@@ -60,10 +62,11 @@ router.post("/add", auth, async (req, res) => {
         }]
       });
     } else {
-      // إذا موجودة، أضف أو حدث المنتج
-      const idx = cart.cart.findIndex(i => i.productId.toString() === productId);
+      const idx = cart.cart.findIndex((i) => i.productId.toString() === productId);
       if (idx >= 0) {
-        cart.cart[idx].qty += qty;
+        const newQty = cart.cart[idx].qty + qty;
+        if (newQty > Number(product.stock || 0)) return res.status(400).json({ message: `لا يوجد مخزون كافٍ للمنتج ${product.name}.` });
+        cart.cart[idx].qty = newQty;
         cart.cart[idx].addedAt = new Date();
       } else {
         cart.cart.push({
@@ -86,10 +89,19 @@ router.post("/add", auth, async (req, res) => {
   }
 });
 
-// =========== جلب جميع السلات ===========
-router.get("/", auth, async (req, res) => {
+router.get("/me", auth, async (req, res) => {
   try {
-    // جلب كل السلات من القاعدة
+    const cart = await UserCart.findOne({ userId: req.userId }).lean();
+    if (!cart) return res.status(200).json({ items: [] });
+    return res.status(200).json({ items: cart.cart || [] });
+  } catch (err) {
+    console.error("GET_MY_CART_ERROR:", err);
+    return res.status(500).json({ message: "خطأ أثناء جلب السلة." });
+  }
+});
+
+router.get("/", auth, adminOnly, async (req, res) => {
+  try {
     const allCarts = await UserCart.find({}).lean();
     res.status(200).json(allCarts);
   } catch (err) {
@@ -98,13 +110,9 @@ router.get("/", auth, async (req, res) => {
   }
 });
 
-// =========== جلب سلة مستخدم معين حسب الايميل ===========
 router.get("/user", auth, async (req, res) => {
   try {
-    const email = req.query.email;
-    if (!email) return res.status(400).json({ message: "الإيميل مطلوب." });
-
-    const cart = await UserCart.findOne({ email }).lean();
+    const cart = await UserCart.findOne({ userId: req.userId }).lean();
     if (!cart) return res.status(200).json({ cart: [] });
     return res.status(200).json(cart);
   } catch (err) {

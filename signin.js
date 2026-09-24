@@ -4,6 +4,7 @@ const jwt = require("jsonwebtoken");
 const rateLimit = require("express-rate-limit");
 const { ipKeyGenerator } = require("express-rate-limit");
 const User = require("./models/User");
+const { sanitizeString } = require("./lib/security");
 
 const router = express.Router();
 
@@ -142,6 +143,7 @@ router.get("/check-auth", auth, (req, res) => {
 
 async function adminOnly(req, res, next) {
   try {
+    if (!req.userId) return res.status(401).json({ message: "غير مصرح" });
     const user = await User.findById(req.userId).select("role").lean();
     if (!user || user.role !== "admin") return res.status(403).json({ message: "غير مصرح: هذه الصفحة للأدمن فقط" });
     next();
@@ -151,6 +153,6 @@ async function adminOnly(req, res, next) {
 // تصدير الميدلوير والراوتر معاً
 module.exports = {
   router,
-  auth
-  ,adminOnly
+  auth,
+  adminOnly
 };

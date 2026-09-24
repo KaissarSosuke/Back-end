@@ -1,8 +1,11 @@
 const express = require("express");
 const mongoose = require("mongoose");
+const rateLimit = require("express-rate-limit");
 const { auth } = require("./signin.js");
+const { sanitizeObjectStrings, sanitizeString } = require("./lib/security");
 
 const router = express.Router();
+const paymentLimiter = rateLimit({ windowMs: 15 * 60 * 1000, max: 20, standardHeaders: true, legacyHeaders: false, message: { message: "محاولات كثيرة جداً، حاول لاحقاً." } });
 
 // ====== تعريف مخطط الطلب ======
 const orderSchema = new mongoose.Schema({
@@ -41,46 +44,62 @@ const Order = mongoose.models.Order || mongoose.model("Order", orderSchema);
 const UserCart = mongoose.model("UserCart");
 
 // =========== إنشاء طلب جديد ===========
-router.post("/payment", auth, async (req, res) => {
+router.post("/payment", paymentLimiter, auth, async (req, res) => {
     try {
-        const { address, phone } = req.body;
-        if (!address || !address.city || !address.district || !address.street || !address.houseNumber || !phone) {
+        const payload = sanitizeObjectStrings(req.body || {});
+        const address = payload.address && typeof payload.address === "object" ? payload.address : {};
+        const phone = sanitizeString(payload.phone, 20);
+        if (!address.city || !address.district || !address.street || !address.houseNumber || !phone) {
             return res.status(400).json({ message: "جميع بيانات التوصيل مطلوبة." });
         }
         if (!/^09[0-9]{8}$/.test(phone)) {
             return res.status(400).json({ message: "رقم الهاتف غير صحيح." });
         }
 
-        // جلب بيانات المستخدم
         const user = await mongoose.model("User").findById(req.userId).select("fullName email").exec();
         if (!user) return res.status(401).json({ message: "المستخدم غير موجود." });
 
-        // جلب السلة
         const cartEntry = await UserCart.findOne({ userId: user._id }).lean();
         if (!cartEntry || !cartEntry.cart || !cartEntry.cart.length) {
             return res.status(400).json({ message: "سلتك فارغة!" });
         }
-        const cart = cartEntry.cart.map(item => ({
-            productId: item.productId,
-            name: item.name,
-            price: item.price,
-            qty: item.qty,
-            images: item.images
-        }));
-        const total = cart.reduce((sum, p) => sum + (p.price || 0) * (p.qty || 0), 0);
 
-        // إنشاء الطلب
+        const Product = mongoose.model("Product");
+        const cart = [];
+        let total = 0;
+        for (const item of cartEntry.cart) {
+            const product = await Product.findById(item.productId).lean();
+            if (!product) return res.status(400).json({ message: `المنتج ${item.name || "غير موجود"} غير متوفر الآن.` });
+            const qty = Number(item.qty || 0);
+            if (!Number.isFinite(qty) || qty < 1) return res.status(400).json({ message: "كمية منتج غير صالحة." });
+            if (qty > Number(product.stock || 0)) return res.status(400).json({ message: `الكمية المطلوبة للمنتج ${product.name} غير متاحة.` });
+            const price = Number(product.price || 0);
+            cart.push({ productId: item.productId, name: product.name, price, qty, images: product.images || [] });
+            total += price * qty;
+        }
+
         const newOrder = new Order({
             userId: user._id,
             fullName: user.fullName,
             email: user.email,
             cart,
             total,
-            address,
+            address: {
+                city: sanitizeString(address.city, 100),
+                district: sanitizeString(address.district, 100),
+                street: sanitizeString(address.street, 200),
+                houseNumber: sanitizeString(address.houseNumber, 50),
+                notes: sanitizeString(address.notes || "", 500)
+            },
             phone,
             status: "قيد الانتظار"
         });
         await newOrder.save();
+
+        for (const item of cart) {
+            await Product.findByIdAndUpdate(item.productId, { $inc: { stock: -item.qty, sold: item.qty } });
+        }
+        await UserCart.deleteOne({ userId: user._id });
 
         res.status(201).json({ message: "تم إرسال الطلب بنجاح!" });
     } catch (err) {
@@ -89,12 +108,9 @@ router.post("/payment", auth, async (req, res) => {
     }
 });
 
-// =========== جلب طلبات المستخدم (حسب الايميل) ===========
-router.get("/orders", auth, async (req, res) => {
+router.get("/orders/me", auth, async (req, res) => {
     try {
-        const email = req.query.email;
-        if (!email) return res.status(400).json({ message: "الإيميل مطلوب." });
-        const orders = await Order.find({ email }).sort({ createdAt: -1 }).lean();
+        const orders = await Order.find({ userId: req.userId }).sort({ createdAt: -1 }).lean();
         res.status(200).json(orders);
     } catch (err) {
         console.error("GET_ORDERS_ERROR:", err);

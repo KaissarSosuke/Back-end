@@ -1,37 +1,20 @@
 const express = require("express");
 const mongoose = require("mongoose");
-const { auth } = require("./signin.js");
+const { auth, adminOnly } = require("./signin.js");
+const { pageParams, sanitizeString, sanitizeObjectStrings } = require("./lib/security");
 
 const router = express.Router();
 
-// ============ إعدادات الأدمن ============
-// Admin check via role field (replaces hardcoded email list)
-const ADMIN_ROLE = "admin";
-
-// Middleware: allows only admins (by role field)
-function adminOnly(req, res, next) {
-  try {
-    const user = await User.findById(req.userId).select("role").lean();
-    if (!user || user.role !== ADMIN_ROLE) {
-      return res.status(403).json({ message: "غير مصرح: هذه الصفحة للأدمن فقط" });
-    }
-    next;
-  } catch (err) {
-    res.status(403).json({ message: "غير مصرح: لا يمكن التحقق من الصلاحيات" });
+function allowedAdminProductFields(body) {
+  const payload = sanitizeObjectStrings(body || {}, 2000);
+  const allowed = ["name", "desc", "price", "images", "tags", "category", "sold", "stock", "rating", "reviews"];
+  const update = {};
+  for (const key of allowed) {
+    if (payload[key] !== undefined) update[key] = payload[key];
   }
+  return update;
 }
 
-// Middleware: يسمح فقط للأدمن بالدخول
-function adminOnly(req, res, next) {
-  const userEmail = (req.userEmail || "").trim().toLowerCase();
-  const isAdmin = ADMINS.map(e => e.trim().toLowerCase()).includes(userEmail);
-  if (!userEmail || !isAdmin) {
-    return res.status(403).json({ message: "غير مصرح: هذه الصفحة للأدمن فقط" });
-  }
-  next();
-}
-
-// تحقق الأدمن
 router.get("/admin/me", auth, adminOnly, (req, res) => {
   res.json({ isAdmin: true, email: req.userEmail });
 });
@@ -39,8 +22,13 @@ router.get("/admin/me", auth, adminOnly, (req, res) => {
 // ============ المستخدمين ============
 router.get("/admin/users", auth, adminOnly, async (req, res) => {
   try {
+    const { limit, page, skip } = pageParams(req.query);
     const User = mongoose.model("User");
-    const users = await User.find({}, "fullName email createdAt ip").lean();
+    const [users, total] = await Promise.all([
+      User.find({}, "fullName email createdAt ip").sort({ createdAt: -1 }).skip(skip).limit(limit).lean(),
+      User.countDocuments({})
+    ]);
+    res.set({ "X-Total-Count": String(total), "X-Page": String(page), "X-Limit": String(limit) });
     res.json(users);
   } catch (err) {
     res.status(500).json({ message: "خطأ أثناء جلب المستخدمين" });
@@ -64,8 +52,13 @@ router.delete("/admin/users/:id", auth, adminOnly, async (req, res) => {
 // جلب كل المنتجات
 router.get("/admin/products", auth, adminOnly, async (req, res) => {
   try {
+    const { limit, page, skip } = pageParams(req.query);
     const Product = mongoose.model("Product");
-    const products = await Product.find({}).lean();
+    const [products, total] = await Promise.all([
+      Product.find({}).sort({ added: -1 }).skip(skip).limit(limit).lean(),
+      Product.countDocuments({})
+    ]);
+    res.set({ "X-Total-Count": String(total), "X-Page": String(page), "X-Limit": String(limit) });
     res.json(products);
   } catch (err) {
     res.status(500).json({ message: "خطأ أثناء جلب المنتجات" });
@@ -76,35 +69,30 @@ router.get("/admin/products", auth, adminOnly, async (req, res) => {
 router.post("/admin/products", auth, adminOnly, async (req, res) => {
   try {
     const Product = mongoose.model("Product");
-    let { name, desc, price, images, tags, category, sold, stock, rating, reviews } = req.body;
+    const payload = sanitizeObjectStrings(req.body || {}, 2000);
+    let { name, desc, price, images, tags, category, sold, stock, rating, reviews } = payload;
 
-    // تحقق من الحقول الأساسية
-    if (!name || !desc || !price || !category || typeof stock === "undefined") {
+    if (!name || !desc || price === undefined || !category || stock === undefined) {
       return res.status(400).json({ message: "يرجى تعبئة جميع الحقول المطلوبة" });
     }
 
-    // معالجة الصور والوسوم إذا كانت سترينج
-    if (typeof images === "string") {
-      images = images.split(",").map(i => i.trim()).filter(Boolean);
-    }
-    if (typeof tags === "string") {
-      tags = tags.split(",").map(t => t.trim()).filter(Boolean);
-    }
+    if (typeof images === "string") images = images.split(",").map((i) => sanitizeString(i, 300)).filter(Boolean);
+    if (typeof tags === "string") tags = tags.split(",").map((t) => sanitizeString(t, 120)).filter(Boolean);
+    if (Number(price) < 0 || Number(stock) < 0) return res.status(400).json({ message: "السعر أو المخزون غير صالح" });
 
     const added = Date.now();
-
     const product = new Product({
-      name,
-      desc,
-      price,
-      images: images || [],
-      tags: tags || [],
-      category,
-      sold: sold || 0,
-      stock,
+      name: sanitizeString(name, 200),
+      desc: sanitizeString(desc, 5000),
+      price: Number(price),
+      images: Array.isArray(images) ? images.map((i) => sanitizeString(i, 300)).filter(Boolean) : [],
+      tags: Array.isArray(tags) ? tags.map((t) => sanitizeString(t, 120)).filter(Boolean) : [],
+      category: sanitizeString(category, 120),
+      sold: Number(sold || 0),
+      stock: Number(stock),
       added,
-      rating: rating || 0,
-      reviews: reviews || 0
+      rating: Number(rating || 0),
+      reviews: Number(reviews || 0)
     });
 
     await product.save();
@@ -120,16 +108,20 @@ router.put("/admin/products/:id", auth, adminOnly, async (req, res) => {
   try {
     const Product = mongoose.model("Product");
     const { id } = req.params;
-    const updateFields = { ...req.body };
+    const updateFields = allowedAdminProductFields(req.body);
 
-    // معالجة الصور والوسوم إذا كانت سترينج
     if (typeof updateFields.images === "string") {
-      updateFields.images = updateFields.images.split(",").map(i => i.trim()).filter(Boolean);
+      updateFields.images = updateFields.images.split(",").map((i) => sanitizeString(i, 300)).filter(Boolean);
     }
     if (typeof updateFields.tags === "string") {
-      updateFields.tags = updateFields.tags.split(",").map(t => t.trim()).filter(Boolean);
+      updateFields.tags = updateFields.tags.split(",").map((t) => sanitizeString(t, 120)).filter(Boolean);
     }
-
+    if (updateFields.price !== undefined && Number(updateFields.price) < 0) {
+      return res.status(400).json({ message: "السعر غير صالح" });
+    }
+    if (updateFields.stock !== undefined && Number(updateFields.stock) < 0) {
+      return res.status(400).json({ message: "المخزون غير صالح" });
+    }
     if (!updateFields.added) updateFields.added = Date.now();
 
     const product = await Product.findByIdAndUpdate(id, updateFields, { new: true });
@@ -156,8 +148,13 @@ router.delete("/admin/products/:id", auth, adminOnly, async (req, res) => {
 // ============ الطلبات ============
 router.get("/admin/orders", auth, adminOnly, async (req, res) => {
   try {
+    const { limit, page, skip } = pageParams(req.query);
     const Order = mongoose.model("Order");
-    const orders = await Order.find({}).sort({ createdAt: -1 }).lean();
+    const [orders, total] = await Promise.all([
+      Order.find({}).sort({ createdAt: -1 }).skip(skip).limit(limit).lean(),
+      Order.countDocuments({})
+    ]);
+    res.set({ "X-Total-Count": String(total), "X-Page": String(page), "X-Limit": String(limit) });
     res.json(orders);
   } catch (err) {
     res.status(500).json({ message: "خطأ أثناء جلب الطلبات" });
@@ -187,8 +184,13 @@ router.put("/admin/orders/:id/status", auth, adminOnly, async (req, res) => {
 // ============ السلال ============
 router.get("/admin/carts", auth, adminOnly, async (req, res) => {
   try {
+    const { limit, page, skip } = pageParams(req.query);
     const UserCart = mongoose.model("UserCart");
-    const carts = await UserCart.find({}).lean();
+    const [carts, total] = await Promise.all([
+      UserCart.find({}).sort({ updatedAt: -1 }).skip(skip).limit(limit).lean(),
+      UserCart.countDocuments({})
+    ]);
+    res.set({ "X-Total-Count": String(total), "X-Page": String(page), "X-Limit": String(limit) });
     res.json(carts);
   } catch (err) {
     res.status(500).json({ message: "خطأ أثناء جلب السلال" });
