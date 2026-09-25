@@ -1,31 +1,19 @@
 const express = require("express");
-const mongoose = require("mongoose");
 const bcrypt = require("bcryptjs");
 const { auth } = require("./signin.js");
+const { sanitizeString } = require("./lib/security");
+const User = require("./models/User");
 const router = express.Router();
-
-// نموذج المستخدم
-let User;
-try {
-  User = require("./models/User");
-} catch (_) {
-  const userSchema = new mongoose.Schema(
-    {
-      fullName: { type: String, required: true, trim: true, minlength: 2, maxlength: 80 },
-      email:    { type: String, required: true, unique: true, lowercase: true, trim: true },
-      password:     { type: String, required: false, select: false },
-      passwordHash: { type: String, required: false, select: false },
-    },
-    { timestamps: true }
-  );
-  User = mongoose.models.User || mongoose.model("User", userSchema);
-}
 
 // تحديث الاسم
 router.post("/profile", auth, async (req, res) => {
   try {
-    const { fullName } = req.body;
-    if (!fullName || typeof fullName !== "string" || fullName.trim().length < 3) {
+    const rawName = req.body?.fullName;
+    if (typeof rawName !== "string") {
+      return res.status(400).json({ message: "يرجى إدخال اسم صحيح" });
+    }
+    const fullName = sanitizeString(rawName, 80);
+    if (fullName.length < 3 || fullName.length > 80) {
       return res.status(400).json({ message: "يرجى إدخال اسم صحيح" });
     }
     const user = await User.findByIdAndUpdate(
@@ -43,11 +31,11 @@ router.post("/profile", auth, async (req, res) => {
 // تغيير كلمة المرور
 router.post("/password", auth, async (req, res) => {
   try {
-    const { currentPassword, newPassword } = req.body;
-    if (!currentPassword || !newPassword) {
+    const { currentPassword, newPassword } = req.body || {};
+    if (typeof currentPassword !== "string" || typeof newPassword !== "string" || !currentPassword || !newPassword) {
       return res.status(400).json({ message: "يرجى تعبئة جميع الحقول" });
     }
-    if (newPassword.length < 8 || !(/[A-Za-z]/.test(newPassword) && /[0-9]/.test(newPassword))) {
+    if (newPassword.length < 8 || newPassword.length > 200 || !(/[A-Za-z]/.test(newPassword) && /[0-9]/.test(newPassword))) {
       return res.status(400).json({ message: "كلمة المرور الجديدة يجب أن لا تقل عن 8 خانات وتحتوي على أحرف وأرقام" });
     }
     // جلب المستخدم مع كلمة المرور
@@ -65,9 +53,10 @@ router.post("/password", auth, async (req, res) => {
     if (same) return res.status(400).json({ message: "يرجى إدخال كلمة مرور جديدة تختلف عن الحالية" });
 
     const newHash = await bcrypt.hash(newPassword, 10);
-    user.password = newHash;
-    user.passwordHash = undefined;
-    await user.save();
+    await User.updateOne(
+      { _id: user._id },
+      { $set: { password: newHash }, $unset: { passwordHash: 1 }, $inc: { tokenVersion: 1 } }
+    );
 
     return res.status(200).json({ message: "تم تغيير كلمة المرور بنجاح" });
   } catch (err) {

@@ -2,40 +2,20 @@ const express = require("express");
 const mongoose = require("mongoose");
 const rateLimit = require("express-rate-limit");
 const { auth, adminOnly } = require("./signin.js");
-const { sanitizeObjectStrings, sanitizeString } = require("./lib/security");
+const { sanitizeObjectStrings, sanitizeString, sanitizeId, isValidObjectId, pageParams, setPageHeaders } = require("./lib/security");
+const UserCart = require("./models/UserCart");
+const Product = require("./models/Product");
 
 const router = express.Router();
 const cartLimiter = rateLimit({ windowMs: 15 * 60 * 1000, max: 60, standardHeaders: true, legacyHeaders: false, message: { message: "محاولات كثيرة جداً، حاول لاحقاً." } });
-
-// ====== تعريف مخطط السلة ======
-const userCartSchema = new mongoose.Schema({
-  userId: { type: mongoose.Schema.Types.ObjectId, required: true, ref: "User" },
-  fullName: { type: String, required: true },
-  email: { type: String, required: true },
-  cart: [
-    {
-      productId: { type: mongoose.Schema.Types.ObjectId, required: true, ref: "Product" },
-      name: { type: String }, // إضافة اسم المنتج
-      price: { type: Number },
-      qty: { type: Number, required: true, min: 1 },
-      images: [String],
-      stock: { type: Number },
-      addedAt: { type: Date, default: Date.now }
-    }
-  ],
-  updatedAt: { type: Date, default: Date.now }
-}, { collection: "usercarts" });
-
-const UserCart = mongoose.model("UserCart", userCartSchema);
-const Product = mongoose.model("Product");
 
 // =========== دالة إضافة منتج إلى السلة ===========
 router.post("/add", cartLimiter, auth, async (req, res) => {
   try {
     const payload = sanitizeObjectStrings(req.body || {});
-    const productId = sanitizeString(payload.productId, 50);
+    const productId = sanitizeId(payload.productId);
     const qty = Number(payload.qty);
-    if (!productId || !Number.isFinite(qty) || qty < 1) {
+    if (!productId || !Number.isInteger(qty) || qty < 1 || qty > 999) {
       return res.status(400).json({ message: "بيانات المنتج أو الكمية غير صحيحة." });
     }
 
@@ -65,6 +45,7 @@ router.post("/add", cartLimiter, auth, async (req, res) => {
       const idx = cart.cart.findIndex((i) => i.productId.toString() === productId);
       if (idx >= 0) {
         const newQty = cart.cart[idx].qty + qty;
+        if (newQty > 999) return res.status(400).json({ message: "تم تجاوز الحد الأقصى للكمية." });
         if (newQty > Number(product.stock || 0)) return res.status(400).json({ message: `لا يوجد مخزون كافٍ للمنتج ${product.name}.` });
         cart.cart[idx].qty = newQty;
         cart.cart[idx].addedAt = new Date();
@@ -102,10 +83,15 @@ router.get("/me", auth, async (req, res) => {
 
 router.get("/", auth, adminOnly, async (req, res) => {
   try {
-    const allCarts = await UserCart.find({}).lean();
+    const { limit, page, skip } = pageParams(req.query);
+    const [allCarts, total] = await Promise.all([
+      UserCart.find({}).sort({ updatedAt: -1 }).skip(skip).limit(limit).lean(),
+      UserCart.countDocuments({})
+    ]);
+    setPageHeaders(res, total, page, limit);
     res.status(200).json(allCarts);
   } catch (err) {
-    console.error("GET_CARTS_ERROR:", err);
+    console.error("GET_CARTS_ERROR:", err.message);
     return res.status(500).json({ message: "خطأ أثناء جلب السلات." });
   }
 });
@@ -124,7 +110,8 @@ router.get("/user", auth, async (req, res) => {
 // =========== دالة حذف منتج من السلة ===========
 router.post("/remove", auth, async (req, res) => {
   try {
-    const { productId } = req.body;
+    const payload = sanitizeObjectStrings(req.body || {});
+    const productId = sanitizeId(payload.productId);
     if (!productId) return res.status(400).json({ message: "معرف المنتج مطلوب." });
 
     let cart = await UserCart.findOne({ userId: req.userId });

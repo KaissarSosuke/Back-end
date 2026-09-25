@@ -11,6 +11,7 @@ const router = express.Router();
 // إعدادات التوكن والكوكيز
 const JWT_SECRET = process.env.JWT_SECRET;
 if (!JWT_SECRET) throw new Error("Missing required environment variable: JWT_SECRET");
+if (JWT_SECRET.length < 32) console.warn("WARNING: JWT_SECRET is short (<32 chars). Use a long random value.");
 const TOKEN_COOKIE_NAME = "token";
 const TOKEN_TTL = "7d";
 
@@ -30,7 +31,7 @@ function toSafeUser(u) {
 }
 
 // ميدلوير التحقق من التوكن في الكوكيز وجعله أكثر قوة
-function auth(req, res, next) {
+async function auth(req, res, next) {
   let token = null;
   // جلب التوكن من الكوكيز أو الهيدر
   if (req.cookies && req.cookies[TOKEN_COOKIE_NAME]) {
@@ -38,12 +39,23 @@ function auth(req, res, next) {
   } else if (req.headers.authorization && req.headers.authorization.startsWith("Bearer ")) {
     token = req.headers.authorization.split(" ")[1];
   }
-  if (!token) return res.status(401).json({ message: "غير مصرح" });
+  if (!token || typeof token !== "string") return res.status(401).json({ message: "غير مصرح" });
   try {
     const payload = jwt.verify(token, JWT_SECRET);
     if (typeof payload.sub !== "string") return res.status(401).json({ message: "جلسة غير صالحة" });
     req.userId = payload.sub;
     req.userEmail = payload.email;
+    // إبطال الجلسات بعد تغيير كلمة المرور (توافق خلفي: التوكنات القديمة بدون نسخة تُعامل كـ 0)
+    try {
+      const user = await User.findById(req.userId).select("tokenVersion").lean();
+      if (user) {
+        const tokenVer = typeof payload.tokenVersion === "number" ? payload.tokenVersion : 0;
+        const currentVer = typeof user.tokenVersion === "number" ? user.tokenVersion : 0;
+        if (tokenVer !== currentVer) return res.status(401).json({ message: "الجلسة منتهية أو غير صالحة" });
+      }
+    } catch (_) {
+      // تجاهل فشل فحص النسخة - التوكن نفسه صالح
+    }
     next();
   } catch (err) {
     return res.status(401).json({ message: "الجلسة منتهية أو غير صالحة" });
@@ -58,7 +70,8 @@ const signinLimiter = rateLimit({
   legacyHeaders: false,
   message: { message: "محاولات كثيرة جداً، حاول لاحقاً." },
   keyGenerator: (req, res) => {
-    const email = (req.body?.email || "").toLowerCase().trim();
+    const rawEmail = req.body?.email;
+    const email = typeof rawEmail === "string" ? rawEmail.toLowerCase().trim().slice(0, 200) : "";
     return `${ipKeyGenerator(req, res)}:${email}`;
   },
 });
@@ -92,7 +105,7 @@ router.post("/signin", signinLimiter, async (req, res) => {
 
     // أنشئ التوكن
     const token = jwt.sign(
-      { sub: String(user._id), email: user.email },
+      { sub: String(user._id), email: user.email, tokenVersion: typeof user.tokenVersion === "number" ? user.tokenVersion : 0 },
       JWT_SECRET,
       { expiresIn: TOKEN_TTL }
     );

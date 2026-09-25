@@ -9,6 +9,14 @@ const cors = require("cors");
 const cookieParser = require("cookie-parser");
 const helmet = require("helmet");
 const { csrfToken, csrfProtection, stateLimiter } = require("./lib/security");
+// تحميل النماذج أولاً لضمان تسجيل واحد فقط ومنع تعريفات مكررة في ملفات المسارات
+require("./models/User");
+require("./models/Product");
+require("./models/Order");
+require("./models/UserCart");
+require("./models/Rating");
+require("./models/Contact");
+require("./models/PendingSignup");
 const User = require("./models/User");
 const app = express();
 app.set("trust proxy", 1);
@@ -42,14 +50,20 @@ app.use("/api", rateRoutes);
 app.use((req, res) => res.status(404).json({ message: "المسار غير موجود" }));
 app.use((err, req, res, next) => {
   if (res.headersSent) return next(err);
+  if (err && err.name === "CastError") return res.status(400).json({ message: "معرف غير صالح" });
+  if (err && err.name === "ValidationError") return res.status(400).json({ message: "بيانات غير صالحة" });
   console.error("REQUEST_ERROR:", err.message);
   res.status(err.statusCode || 500).json({ message: "حدث خطأ غير متوقع" });
 });
 
 async function start() {
   await mongoose.connect(process.env.MONGODB_URI);
+  if (process.env.JWT_SECRET && process.env.JWT_SECRET.length < 32) console.warn("WARNING: JWT_SECRET is short (<32 chars).");
   const configuredAdmins = (process.env.ADMIN_EMAILS || "").split(",").map((e) => e.trim().toLowerCase()).filter(Boolean);
-  if (configuredAdmins.length) await User.updateMany({ email: { $in: configuredAdmins } }, { $set: { role: "admin" } });
+  if (configuredAdmins.length) {
+    const r = await User.updateMany({ email: { $in: configuredAdmins } }, { $set: { role: "admin" } });
+    console.log(`Admin promotion applied to ${r.modifiedCount || 0} user(s).`);
+  }
   const port = Number(process.env.PORT) || 2007;
   app.listen(port, () => console.log(`Server is running on port ${port}`));
 }

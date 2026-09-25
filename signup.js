@@ -7,8 +7,9 @@ const User = require("./models/User");
 const PendingSignup = require("./models/PendingSignup");
 const router = express.Router();
 const limiter = rateLimit({ windowMs: 15 * 60 * 1000, max: 8, standardHeaders: true, legacyHeaders: false, message: { message: "محاولات كثيرة جداً، حاول لاحقاً." } });
-const transporter = nodemailer.createTransport({ host: "smtp.gmail.com", port: 587, secure: false, auth: { user: process.env.SMTP_USER, pass: process.env.SMTP_PASS } });
+const transporter = nodemailer.createTransport({ host: "smtp.gmail.com", port: 587, secure: false, requireTLS: true, auth: { user: process.env.SMTP_USER, pass: process.env.SMTP_PASS } });
 const normalizeEmail = (value) => typeof value === "string" ? value.trim().toLowerCase() : null;
+const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 function generateCode() { return crypto.randomInt(100000, 1000000).toString(); }
 async function sendVerificationCode(email, code) {
   await transporter.sendMail({ from: `"سوق.كوم" <${process.env.SMTP_USER}>`, to: email, subject: "كود التحقق لإنشاء حساب سوق.كوم", text: `كود التحقق الخاص بك هو: ${code}\nيرجى إدخاله خلال 5 دقائق.` });
@@ -18,7 +19,7 @@ router.post("/signup/send-code", limiter, async (req, res) => {
     const fullName = typeof req.body?.fullName === "string" ? req.body.fullName.trim() : "";
     const email = normalizeEmail(req.body?.email);
     const password = req.body?.password;
-    if (fullName.length < 2 || fullName.length > 80 || !email || typeof password !== "string" || password.length < 8 || !/[A-Za-z]/.test(password) || !/[0-9]/.test(password)) return res.status(400).json({ message: "بيانات التسجيل غير صحيحة" });
+    if (fullName.length < 2 || fullName.length > 80 || !email || !EMAIL_RE.test(email) || email.length > 200 || typeof password !== "string" || password.length < 8 || !/[A-Za-z]/.test(password) || !/[0-9]/.test(password)) return res.status(400).json({ message: "بيانات التسجيل غير صحيحة" });
     if (await User.findOne({ email }).lean()) return res.status(409).json({ message: "البريد الإلكتروني مستخدم بالفعل" });
     const pending = await PendingSignup.findOne({ email }).select("+codeHash").lean();
     if (pending && pending.expiresAt > Date.now() && pending.attempts < 5) return res.status(429).json({ message: "تم إرسال كود بالفعل لهذا البريد، يرجى الانتظار." });
@@ -32,7 +33,7 @@ router.post("/signup/verify-code", limiter, async (req, res) => {
   try {
     const email = normalizeEmail(req.body?.email);
     const code = typeof req.body?.code === "string" ? req.body.code.trim() : "";
-    if (!email || !/^\d{6}$/.test(code)) return res.status(400).json({ message: "بيانات التحقق غير صحيحة" });
+    if (!email || !EMAIL_RE.test(email) || !/^\d{6}$/.test(code)) return res.status(400).json({ message: "بيانات التحقق غير صحيحة" });
     const pending = await PendingSignup.findOne({ email }).select("+password +codeHash");
     if (!pending || pending.expiresAt < Date.now()) return res.status(400).json({ message: "انتهت صلاحية الكود، أعد التسجيل." });
     if (pending.attempts >= 5) { await PendingSignup.deleteOne({ email }); return res.status(429).json({ message: "محاولات كثيرة جداً، يرجى إعادة التسجيل." }); }
